@@ -39,7 +39,14 @@ jobs:
 
           export PATH="$(dirname "$SDKMANAGER"):$ANDROID_HOME/platform-tools:$PATH"
 
+          set +o pipefail
           yes | "$SDKMANAGER" --licenses
+          LICENSE_STATUS=${PIPESTATUS[1]}
+          set -o pipefail
+          
+          if [ "$LICENSE_STATUS" -ne 0 ]; then
+            exit "$LICENSE_STATUS"
+          fi
 
           "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
 
