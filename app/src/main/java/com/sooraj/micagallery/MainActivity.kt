@@ -1,5 +1,6 @@
 package com.sooraj.micagallery
 
+import androidx.activity.compose.setContent
 import android.Manifest
 import android.content.ContentUris
 import android.content.ContentValues
