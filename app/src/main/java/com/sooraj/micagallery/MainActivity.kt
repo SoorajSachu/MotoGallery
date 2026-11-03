@@ -37,11 +37,17 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -374,8 +380,12 @@ private fun MediaViewer(item: MediaItem, favourite: Boolean, onToggleFavourite: 
     androidx.compose.ui.window.Dialog(onDismissRequest = onClose,
         properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
         Box(Modifier.fillMaxSize().background(Color(0xFF05080D))) {
-            AsyncImage(model = item.uri, contentDescription = item.name,
-                contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+            if (item.isVideo) {
+                VideoPlayer(item.uri, Modifier.fillMaxSize())
+            } else {
+                AsyncImage(model = item.uri, contentDescription = item.name,
+                    contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+            }
             Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onClose) { Icon(Icons.Rounded.ArrowBack, "Back", tint = Color.White) }
@@ -390,17 +400,44 @@ private fun MediaViewer(item: MediaItem, favourite: Boolean, onToggleFavourite: 
                 }
                 IconButton(onClick = onShare) { Icon(Icons.Rounded.Share, "Share", tint = Color.White) }
             }
-            if (item.isVideo) {
-                Surface(color = Color(0xAA182536), shape = CircleShape,
-                    modifier = Modifier.align(Alignment.Center).size(62.dp)) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Rounded.PlayArrow, "Play video", tint = Color.White,
-                            modifier = Modifier.size(38.dp))
-                    }
-                }
-            }
         }
     }
+}
+
+@Composable
+private fun VideoPlayer(uri: Uri, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val player = remember(uri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(androidx.media3.common.MediaItem.fromUri(uri))
+            prepare()
+            playWhenReady = true
+        }
+    }
+
+    DisposableEffect(player, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) player.pause()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            player.release()
+        }
+    }
+
+    AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                this.player = player
+                useController = true
+                controllerShowTimeoutMs = 2500
+            }
+        },
+        update = { it.player = player }
+    )
 }
 
 private fun hasMediaPermission(context: Context): Boolean {
