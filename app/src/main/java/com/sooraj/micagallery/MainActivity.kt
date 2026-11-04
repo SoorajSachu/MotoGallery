@@ -1,6 +1,8 @@
 package com.sooraj.micagallery
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ContentUris
 import android.content.Context
@@ -10,7 +12,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
-import android.app.Activity
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -20,12 +21,22 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
@@ -37,15 +48,24 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -58,6 +78,12 @@ import coil.Coil
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.VideoFrameDecoder
+import coil.request.ImageRequest
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.haze
+import dev.chrisbanes.haze.hazeChild
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -76,20 +102,23 @@ private data class MediaItem(
 
 private enum class Tab { PHOTOS, ALBUMS, FAVOURITES }
 
+private const val LIGHTROOM_PACKAGE = "com.adobe.lrmobile"
+
 private fun Set<Long>.toggle(id: Long): Set<Long> = if (id in this) this - id else this + id
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // "auto" = light or dark system-bar icons, following the system theme
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+            statusBarStyle = SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
         requestHighRefreshRate()
         Coil.setImageLoader(
             ImageLoader.Builder(this).components { add(VideoFrameDecoder.Factory()) }.build()
         )
-        setContent { MicaGalleryApp() }
+        setContent { MicaTheme { MicaGalleryApp() } }
     }
 
     /** Ask the system for the highest refresh rate (e.g. 120 Hz) at the current resolution. */
@@ -103,11 +132,56 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** Material You: uses the wallpaper-based system colours (Android 12+) and follows light/dark mode. */
+@Composable
+private fun MicaTheme(content: @Composable () -> Unit) {
+    val dark = isSystemInDarkTheme()
+    val context = LocalContext.current
+    val scheme = when {
+        Build.VERSION.SDK_INT >= 31 ->
+            if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        dark -> darkColorScheme()
+        else -> lightColorScheme()
+    }
+    MaterialTheme(colorScheme = scheme, content = content)
+}
+
+// ---------- Liquid glass helpers ----------
+
+@Composable
+private fun rememberGlassStyle(): HazeStyle {
+    val cs = MaterialTheme.colorScheme
+    return remember(cs) {
+        HazeStyle(
+            backgroundColor = cs.surface,
+            tint = HazeTint(cs.surface.copy(alpha = 0.40f)),
+            blurRadius = 26.dp,
+            noiseFactor = 0.03f,
+            fallbackTint = HazeTint(cs.surface.copy(alpha = 0.90f))
+        )
+    }
+}
+
+/** Blurred, tinted glass with a specular edge highlight. Falls back to a scrim when [state] is null. */
+private fun Modifier.glass(state: HazeState?, style: HazeStyle, shape: Shape, scrim: Color): Modifier {
+    val base = this.clip(shape)
+    val blurred = if (state != null) base.hazeChild(state, style) else base.background(scrim)
+    return blurred
+        .background(Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.16f), Color.Transparent)))
+        .border(
+            1.dp,
+            Brush.linearGradient(listOf(Color.White.copy(alpha = 0.55f), Color.White.copy(alpha = 0.06f), Color.White.copy(alpha = 0.28f))),
+            shape
+        )
+}
+
 @Composable
 private fun MicaGalleryApp() {
     val context = LocalContext.current
+    val cs = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
     val prefs = remember { context.getSharedPreferences("mica_gallery", Context.MODE_PRIVATE) }
     var media by remember { mutableStateOf(emptyList<MediaItem>()) }
     var favourites by remember { mutableStateOf(prefs.getStringSet("favourites", emptySet())?.toSet() ?: emptySet()) }
@@ -119,7 +193,11 @@ private fun MicaGalleryApp() {
     var pendingDelete by remember { mutableStateOf(emptySet<Long>()) }
     var permissionGranted by remember { mutableStateOf(hasMediaPermission(context)) }
     var loading by remember { mutableStateOf(false) }
+    var topBarPx by remember { mutableIntStateOf(0) }
     val selectionMode = selectedIds.isNotEmpty()
+    val hazeState = remember { HazeState() }
+    val glassStyle = rememberGlassStyle()
+    val topInset = with(density) { topBarPx.toDp() } + 8.dp
 
     val permissions = remember {
         if (Build.VERSION.SDK_INT >= 34) arrayOf(
@@ -237,175 +315,181 @@ private fun MicaGalleryApp() {
     BackHandler(enabled = selectionMode && selected == null) { selectedIds = emptySet() }
     BackHandler(enabled = !selectionMode && selected == null && selectedAlbum != null) { selectedAlbum = null }
 
-    MaterialTheme(colorScheme = darkColorScheme(
-        background = Color(0xFF0B1018),
-        surface = Color(0xCC1B2532),
-        primary = Color(0xFFB9D7FF),
-        onPrimary = Color(0xFF10243B),
-        onBackground = Color(0xFFF1F5FA),
-        onSurface = Color(0xFFF1F5FA),
-        secondary = Color(0xFFB9C8D9)
-    )) {
-        CompositionLocalProvider(LocalContentColor provides Color(0xFFF1F5FA)) {
+    CompositionLocalProvider(LocalContentColor provides cs.onBackground) {
+        Box(Modifier.fillMaxSize().background(cs.background)) {
+
+            // ---- Content: scrolls underneath the glass bars (this is the blur source) ----
             Box(
-                Modifier.fillMaxSize().background(
-                    Brush.linearGradient(listOf(Color(0xFF17283B), Color(0xFF0B1018), Color(0xFF17202D)))
-                )
+                Modifier.fillMaxSize()
+                    .haze(hazeState)
+                    .background(Brush.linearGradient(listOf(
+                        cs.primaryContainer.copy(alpha = 0.45f).compositeOver(cs.background),
+                        cs.background,
+                        cs.tertiaryContainer.copy(alpha = 0.35f).compositeOver(cs.background)
+                    )))
             ) {
-                Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                    Spacer(Modifier.height(14.dp))
-                    if (selectionMode) {
-                        SelectionBar(
-                            count = selectedIds.size,
-                            allFavourite = selectedItems.isNotEmpty() &&
-                                selectedItems.all { it.id.toString() in favourites },
-                            onClose = { selectedIds = emptySet() },
-                            onSelectAll = { selectedIds = visible.map { it.id }.toSet() },
-                            onFavourite = { toggleFavourites(selectedItems) },
-                            onShare = { shareItems(selectedItems) },
-                            onDelete = { deleteItems(selectedItems) }
-                        )
-                    } else {
-                        Row(
-                            Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 22.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                when {
+                    !permissionGranted -> Box(Modifier.fillMaxSize().padding(top = topInset)) {
+                        PermissionPrompt { permissionLauncher.launch(permissions) }
+                    }
+                    loading && media.isEmpty() -> Box(
+                        Modifier.fillMaxSize().padding(top = topInset), contentAlignment = Alignment.Center
+                    ) { CircularProgressIndicator() }
+                    tab == Tab.ALBUMS && selectedAlbum == null -> {
+                        if (albums.isEmpty()) Box(Modifier.fillMaxSize().padding(top = topInset)) {
+                            EmptyState("No photos yet", "Your camera roll will appear here.")
+                        } else LazyVerticalGrid(
+                            columns = GridCells.Fixed(2),
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = topInset, bottom = 130.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Column(Modifier.weight(1f)) {
-                                Text("MICA", fontSize = 12.sp, letterSpacing = 3.sp,
-                                    color = Color(0xFF9DB5CE), fontWeight = FontWeight.SemiBold)
-                                Text(selectedAlbum ?: "Gallery",
-                                    fontSize = 30.sp, fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            Surface(
-                                color = Color(0x442B3C50), shape = CircleShape,
-                                modifier = Modifier.size(46.dp).clickable { refresh() }
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Rounded.Refresh, contentDescription = "Refresh")
-                                }
+                            items(albums, key = { it.first }, contentType = { "album" }) { (name, items) ->
+                                AlbumTile(name, items.size, items.firstOrNull()?.uri) { selectedAlbum = name }
                             }
                         }
                     }
-
-                    Spacer(Modifier.height(14.dp))
-                    Surface(
-                        color = Color(0x552B3C50),
-                        shape = RoundedCornerShape(20.dp),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp)
-                    ) {
-                        Row(Modifier.padding(horizontal = 15.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Rounded.Search, null, tint = Color(0xFFB8C8D9))
-                            Spacer(Modifier.width(10.dp))
-                            TextField(
-                                value = search, onValueChange = { search = it },
-                                placeholder = { Text("Search photos and albums", color = Color(0xFF91A2B5)) },
-                                singleLine = true,
-                                colors = TextFieldDefaults.colors(
-                                    focusedContainerColor = Color.Transparent,
-                                    unfocusedContainerColor = Color.Transparent,
-                                    focusedIndicatorColor = Color.Transparent,
-                                    unfocusedIndicatorColor = Color.Transparent,
-                                    cursorColor = Color(0xFFB9D7FF)
-                                ),
-                                modifier = Modifier.weight(1f)
-                            )
-                            if (search.isNotEmpty()) IconButton(onClick = { search = "" }) {
-                                Icon(Icons.Rounded.Close, "Clear search")
-                            }
-                        }
-                    }
-
-                    Spacer(Modifier.height(10.dp))
-                    when {
-                        !permissionGranted -> PermissionPrompt { permissionLauncher.launch(permissions) }
-                        loading && media.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator()
-                        }
-                        tab == Tab.ALBUMS && selectedAlbum == null -> {
-                            if (albums.isEmpty()) EmptyState("No photos yet", "Your camera roll will appear here.")
-                            else LazyVerticalGrid(
-                                columns = GridCells.Fixed(2),
-                                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 130.dp),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                items(albums, key = { it.first }, contentType = { "album" }) { (name, items) ->
-                                    AlbumTile(name, items.size, items.firstOrNull()?.uri) {
-                                        selectedAlbum = name
-                                    }
-                                }
-                            }
-                        }
-                        visible.isEmpty() -> EmptyState(
+                    visible.isEmpty() -> Box(Modifier.fillMaxSize().padding(top = topInset)) {
+                        EmptyState(
                             if (tab == Tab.FAVOURITES) "Nothing saved yet" else "No media found",
                             if (tab == Tab.FAVOURITES) "Tap the heart on a photo to keep it here." else "Try another search or add some photos."
                         )
-                        else -> {
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 2.dp),
+                    }
+                    else -> LazyVerticalGrid(
+                        columns = GridCells.Fixed(3),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 3.dp, end = 3.dp, top = topInset, bottom = 130.dp),
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        item(key = "header", span = { GridItemSpan(maxLineSpan) }, contentType = "header") {
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 17.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                Text("${visible.size} items", color = Color(0xFF9FB0C2), fontSize = 12.sp)
+                                Text("${visible.size} items", color = cs.onSurfaceVariant, fontSize = 12.sp)
                                 Spacer(Modifier.weight(1f))
                                 if (selectedAlbum != null) TextButton(onClick = { selectedAlbum = null }) {
                                     Text("All albums")
                                 }
                             }
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
-                                contentPadding = PaddingValues(start = 3.dp, end = 3.dp, bottom = 130.dp),
-                                horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                verticalArrangement = Arrangement.spacedBy(3.dp)
-                            ) {
-                                items(visible, key = { it.id }, contentType = { "media" }) { item ->
-                                    MediaTile(
-                                        item = item,
-                                        selected = item.id in selectedIds,
-                                        selectionMode = selectionMode,
-                                        onClick = onTileClick,
-                                        onLongClick = onTileLongClick
-                                    )
-                                }
-                            }
+                        }
+                        items(visible, key = { it.id }, contentType = { "media" }) { item ->
+                            MediaTile(
+                                item = item,
+                                selected = item.id in selectedIds,
+                                selectionMode = selectionMode,
+                                onClick = onTileClick,
+                                onLongClick = onTileLongClick
+                            )
                         }
                     }
                 }
+            }
 
-                // Floating translucent bottom navigation (the only tab bar)
-                Surface(
-                    color = Color(0xCC1B2939),
-                    shape = RoundedCornerShape(28.dp),
-                    shadowElevation = 18.dp,
-                    modifier = Modifier.align(Alignment.BottomCenter)
-                        .navigationBarsPadding()
-                        .padding(start = 24.dp, end = 24.dp, bottom = 18.dp)
+            // ---- Glass top panel: title / selection actions + search ----
+            Column(
+                Modifier.align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .onSizeChanged { topBarPx = it.height }
+                    .glass(hazeState, glassStyle,
+                        RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp), cs.surface.copy(alpha = 0.9f))
+                    .statusBarsPadding()
+                    .padding(bottom = 14.dp)
+            ) {
+                Spacer(Modifier.height(10.dp))
+                if (selectionMode) {
+                    SelectionBar(
+                        count = selectedIds.size,
+                        allFavourite = selectedItems.isNotEmpty() &&
+                            selectedItems.all { it.id.toString() in favourites },
+                        onClose = { selectedIds = emptySet() },
+                        onSelectAll = { selectedIds = visible.map { it.id }.toSet() },
+                        onFavourite = { toggleFavourites(selectedItems) },
+                        onShare = { shareItems(selectedItems) },
+                        onDelete = { deleteItems(selectedItems) }
+                    )
+                } else {
+                    Row(
+                        Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 22.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("MICA", fontSize = 12.sp, letterSpacing = 3.sp,
+                                color = cs.primary, fontWeight = FontWeight.SemiBold)
+                            Text(selectedAlbum ?: "Gallery",
+                                fontSize = 30.sp, fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Box(
+                            Modifier.size(46.dp).clip(CircleShape)
+                                .background(cs.onSurface.copy(alpha = 0.08f))
+                                .clickable { refresh() },
+                            contentAlignment = Alignment.Center
+                        ) { Icon(Icons.Rounded.Refresh, contentDescription = "Refresh") }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 18.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(cs.onSurface.copy(alpha = 0.08f))
+                        .padding(horizontal = 15.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(28.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        NavItem(Icons.Rounded.PhotoLibrary, "Photos", tab == Tab.PHOTOS) {
-                            tab = Tab.PHOTOS; selectedAlbum = null
-                        }
-                        NavItem(Icons.Rounded.Folder, "Albums", tab == Tab.ALBUMS) {
-                            tab = Tab.ALBUMS; selectedAlbum = null
-                        }
-                        NavItem(Icons.Rounded.Favorite, "Saved", tab == Tab.FAVOURITES) {
-                            tab = Tab.FAVOURITES; selectedAlbum = null
-                        }
+                    Icon(Icons.Rounded.Search, null, tint = cs.onSurfaceVariant)
+                    Spacer(Modifier.width(10.dp))
+                    TextField(
+                        value = search, onValueChange = { search = it },
+                        placeholder = { Text("Search photos and albums", color = cs.onSurfaceVariant) },
+                        singleLine = true,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            cursorColor = cs.primary
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (search.isNotEmpty()) IconButton(onClick = { search = "" }) {
+                        Icon(Icons.Rounded.Close, "Clear search")
                     }
                 }
             }
 
-            selected?.let { item ->
-                MediaViewer(
-                    item = item,
-                    favourite = item.id.toString() in favourites,
-                    onToggleFavourite = { toggleFavourites(listOf(item)) },
-                    onShare = { shareItems(listOf(item)) },
-                    onDelete = { deleteItems(listOf(item)) },
-                    onClose = { selected = null }
-                )
+            // ---- Floating glass bottom navigation ----
+            Row(
+                Modifier.align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 18.dp)
+                    .glass(hazeState, glassStyle, RoundedCornerShape(30.dp), cs.surface.copy(alpha = 0.9f))
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                NavItem(Icons.Rounded.PhotoLibrary, "Photos", tab == Tab.PHOTOS) {
+                    tab = Tab.PHOTOS; selectedAlbum = null
+                }
+                NavItem(Icons.Rounded.Folder, "Albums", tab == Tab.ALBUMS) {
+                    tab = Tab.ALBUMS; selectedAlbum = null
+                }
+                NavItem(Icons.Rounded.Favorite, "Saved", tab == Tab.FAVOURITES) {
+                    tab = Tab.FAVOURITES; selectedAlbum = null
+                }
             }
+        }
+
+        selected?.let { item ->
+            MediaViewer(
+                item = item,
+                favourite = item.id.toString() in favourites,
+                onToggleFavourite = { toggleFavourites(listOf(item)) },
+                onShare = { shareItems(listOf(item)) },
+                onEdit = { openInLightroom(context, item.uri) },
+                onDelete = { deleteItems(listOf(item)) },
+                onClose = { selected = null }
+            )
         }
     }
 }
@@ -425,7 +509,7 @@ private fun SelectionBar(
         IconButton(onClick = onSelectAll) { Icon(Icons.Rounded.SelectAll, "Select all") }
         IconButton(onClick = onFavourite) {
             Icon(if (allFavourite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                "Favourite", tint = if (allFavourite) Color(0xFFFF7D91) else LocalContentColor.current)
+                "Favourite", tint = if (allFavourite) MaterialTheme.colorScheme.tertiary else LocalContentColor.current)
         }
         IconButton(onClick = onShare) { Icon(Icons.Rounded.Share, "Share") }
         IconButton(onClick = onDelete) { Icon(Icons.Rounded.Delete, "Delete") }
@@ -433,13 +517,18 @@ private fun SelectionBar(
 }
 
 @Composable
-private fun NavItem(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String,
-                    active: Boolean, onClick: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.clickable(onClick = onClick)) {
-        Icon(icon, null, tint = if (active) Color(0xFFB9D7FF) else Color(0xFF9AABBD))
-        Text(label, fontSize = 10.sp,
-            color = if (active) Color(0xFFB9D7FF) else Color(0xFF9AABBD))
+private fun NavItem(icon: ImageVector, label: String, active: Boolean, onClick: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val tint = if (active) cs.onPrimaryContainer else cs.onSurfaceVariant
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clip(RoundedCornerShape(22.dp))
+            .background(if (active) cs.primaryContainer.copy(alpha = 0.75f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 6.dp)
+    ) {
+        Icon(icon, null, tint = tint)
+        Text(label, fontSize = 10.sp, color = tint)
     }
 }
 
@@ -449,25 +538,26 @@ private fun MediaTile(
     item: MediaItem, selected: Boolean, selectionMode: Boolean,
     onClick: (MediaItem) -> Unit, onLongClick: (MediaItem) -> Unit
 ) {
-    Box(Modifier.aspectRatio(1f).clip(RoundedCornerShape(5.dp)).background(Color(0xFF263546))
+    val cs = MaterialTheme.colorScheme
+    Box(Modifier.aspectRatio(1f).clip(RoundedCornerShape(5.dp)).background(cs.surfaceContainerHighest)
         .combinedClickable(onClick = { onClick(item) }, onLongClick = { onLongClick(item) })) {
         AsyncImage(model = item.uri, contentDescription = item.name,
             contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         if (item.isVideo) {
-            Surface(color = Color(0x99000000), shape = CircleShape,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(7.dp).size(25.dp)) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.size(17.dp))
-                }
+            Box(Modifier.align(Alignment.BottomEnd).padding(7.dp).size(25.dp)
+                .clip(CircleShape).background(Color(0x99000000)),
+                contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.size(17.dp))
             }
         }
-        if (selected) Box(Modifier.fillMaxSize().background(Color(0x663A7BD5)))
+        if (selected) Box(Modifier.fillMaxSize().background(cs.primary.copy(alpha = 0.35f)))
         if (selectionMode) {
             Icon(
                 if (selected) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
                 contentDescription = if (selected) "Selected" else "Not selected",
-                tint = if (selected) Color(0xFFB9D7FF) else Color(0xDDFFFFFF),
+                tint = if (selected) cs.onPrimary else Color(0xDDFFFFFF),
                 modifier = Modifier.align(Alignment.TopStart).padding(6.dp).size(22.dp)
+                    .then(if (selected) Modifier.background(cs.primary, CircleShape) else Modifier)
             )
         }
     }
@@ -475,78 +565,192 @@ private fun MediaTile(
 
 @Composable
 private fun AlbumTile(name: String, count: Int, cover: Uri?, onClick: () -> Unit) {
-    Column(Modifier.clip(RoundedCornerShape(18.dp)).background(Color(0x442B3C50))
+    val cs = MaterialTheme.colorScheme
+    Column(Modifier.clip(RoundedCornerShape(18.dp)).background(cs.surfaceContainerHigh.copy(alpha = 0.7f))
         .clickable(onClick = onClick).padding(7.dp)) {
         Box(Modifier.fillMaxWidth().aspectRatio(1.12f).clip(RoundedCornerShape(13.dp))
-            .background(Color(0xFF263546))) {
+            .background(cs.surfaceContainerHighest)) {
             if (cover != null) AsyncImage(cover, null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize())
         }
         Spacer(Modifier.height(9.dp))
         Text(name, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 5.dp))
-        Text("$count items", color = Color(0xFF9FB0C2), fontSize = 11.sp,
+        Text("$count items", color = cs.onSurfaceVariant, fontSize = 11.sp,
             modifier = Modifier.padding(start = 5.dp, bottom = 5.dp))
     }
 }
 
 @Composable
 private fun EmptyState(title: String, subtitle: String) {
+    val cs = MaterialTheme.colorScheme
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Rounded.PhotoLibrary, null, tint = Color(0xFF71869B), modifier = Modifier.size(48.dp))
+            Icon(Icons.Rounded.PhotoLibrary, null, tint = cs.onSurfaceVariant, modifier = Modifier.size(48.dp))
             Spacer(Modifier.height(12.dp))
             Text(title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, color = Color(0xFF9FB0C2), fontSize = 13.sp)
+            Text(subtitle, color = cs.onSurfaceVariant, fontSize = 13.sp)
         }
     }
 }
 
 @Composable
 private fun PermissionPrompt(onGrant: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(30.dp)) {
-            Icon(Icons.Rounded.PhotoLibrary, null, modifier = Modifier.size(54.dp),
-                tint = Color(0xFFB9D7FF))
+            Icon(Icons.Rounded.PhotoLibrary, null, modifier = Modifier.size(54.dp), tint = cs.primary)
             Spacer(Modifier.height(12.dp))
             Text("Your photos, beautifully organised", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(6.dp))
             Text("Allow media access so Mica Gallery can display photos and videos stored on this device.",
-                color = Color(0xFFB1C0D0), fontSize = 13.sp)
+                color = cs.onSurfaceVariant, fontSize = 13.sp)
             Spacer(Modifier.height(18.dp))
             Button(onClick = onGrant) { Text("Allow access") }
         }
     }
 }
 
+// ---------- Full-screen viewer ----------
+
 @Composable
-private fun MediaViewer(item: MediaItem, favourite: Boolean, onToggleFavourite: () -> Unit,
-                        onShare: () -> Unit, onDelete: () -> Unit, onClose: () -> Unit) {
-    androidx.compose.ui.window.Dialog(onDismissRequest = onClose,
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
-        Box(Modifier.fillMaxSize().background(Color(0xFF05080D))) {
-            if (item.isVideo) {
-                VideoPlayer(item.uri, Modifier.fillMaxSize())
-            } else {
-                AsyncImage(model = item.uri, contentDescription = item.name,
-                    contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+private fun MediaViewer(
+    item: MediaItem, favourite: Boolean, onToggleFavourite: () -> Unit, onShare: () -> Unit,
+    onEdit: () -> Unit, onDelete: () -> Unit, onClose: () -> Unit
+) {
+    val hazeState = remember { HazeState() }
+    // The viewer is always dark, like most gallery apps, so photos are shown on black.
+    val darkGlass = remember {
+        HazeStyle(
+            backgroundColor = Color.Black,
+            tint = HazeTint(Color.Black.copy(alpha = 0.35f)),
+            blurRadius = 28.dp,
+            noiseFactor = 0.03f,
+            fallbackTint = HazeTint(Color.Black.copy(alpha = 0.75f))
+        )
+    }
+    var chromeVisible by remember { mutableStateOf(true) }
+    val showChrome = chromeVisible || item.isVideo
+    // Video renders on its own surface, which can't be blurred, so use a plain scrim there.
+    val blurState: HazeState? = if (item.isVideo) null else hazeState
+
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onClose,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            Box(Modifier.fillMaxSize().haze(hazeState)) {
+                if (item.isVideo) {
+                    VideoPlayer(item.uri, Modifier.fillMaxSize())
+                } else {
+                    ZoomableImage(item, Modifier.fillMaxSize()) { chromeVisible = !chromeVisible }
+                }
             }
-            Row(Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose) { Icon(Icons.Rounded.ArrowBack, "Back", tint = Color.White) }
-                Column(Modifier.weight(1f)) {
-                    Text(item.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(SimpleDateFormat("dd MMM yyyy · HH:mm", Locale.getDefault()).format(Date(item.date)),
-                        color = Color(0xFFB7C2CF), fontSize = 11.sp)
+
+            AnimatedVisibility(
+                visible = showChrome, enter = fadeIn(), exit = fadeOut(),
+                modifier = Modifier.align(Alignment.TopCenter)
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(12.dp)
+                        .glass(blurState, darkGlass, RoundedCornerShape(28.dp), Color.Black.copy(alpha = 0.5f))
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onClose) { Icon(Icons.Rounded.ArrowBack, "Back", tint = Color.White) }
+                    Column(Modifier.weight(1f)) {
+                        Text(item.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(SimpleDateFormat("dd MMM yyyy · HH:mm", Locale.getDefault()).format(Date(item.date)),
+                            color = Color(0xFFD0D6DD), fontSize = 11.sp)
+                    }
                 }
-                IconButton(onClick = onToggleFavourite) {
-                    Icon(if (favourite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                        "Favourite", tint = if (favourite) Color(0xFFFF7D91) else Color.White)
+            }
+
+            AnimatedVisibility(
+                visible = showChrome, enter = fadeIn(), exit = fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter)
+            ) {
+                Row(
+                    Modifier.padding(bottom = if (item.isVideo) 120.dp else 24.dp)
+                        .glass(blurState, darkGlass, RoundedCornerShape(30.dp), Color.Black.copy(alpha = 0.5f))
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onToggleFavourite) {
+                        Icon(if (favourite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                            "Favourite", tint = if (favourite) Color(0xFFFF8FA3) else Color.White)
+                    }
+                    IconButton(onClick = onShare) { Icon(Icons.Rounded.Share, "Share", tint = Color.White) }
+                    if (!item.isVideo) IconButton(onClick = onEdit) {
+                        Icon(Icons.Rounded.Edit, "Edit in Lightroom", tint = Color.White)
+                    }
+                    IconButton(onClick = onDelete) { Icon(Icons.Rounded.Delete, "Delete", tint = Color.White) }
                 }
-                IconButton(onClick = onShare) { Icon(Icons.Rounded.Share, "Share", tint = Color.White) }
-                IconButton(onClick = onDelete) { Icon(Icons.Rounded.Delete, "Delete", tint = Color.White) }
             }
         }
+    }
+}
+
+/** Pinch to zoom, drag to pan when zoomed, double-tap to zoom in/out, tap to hide the bars. */
+@Composable
+private fun ZoomableImage(item: MediaItem, modifier: Modifier, onTap: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var scale by remember(item.id) { mutableFloatStateOf(1f) }
+    var offset by remember(item.id) { mutableStateOf(Offset.Zero) }
+    var box by remember { mutableStateOf(IntSize.Zero) }
+
+    fun clampOffset(o: Offset, s: Float): Offset {
+        val maxX = box.width * (s - 1f) / 2f
+        val maxY = box.height * (s - 1f) / 2f
+        return Offset(o.x.coerceIn(-maxX, maxX), o.y.coerceIn(-maxY, maxY))
+    }
+
+    Box(
+        modifier
+            .onSizeChanged { box = it }
+            .pointerInput(item.id) {
+                detectTapGestures(
+                    onTap = { onTap() },
+                    onDoubleTap = { tap ->
+                        scope.launch {
+                            val s0 = scale
+                            val o0 = offset
+                            val s1 = if (s0 > 1.05f) 1f else 2.5f
+                            val center = Offset(box.width / 2f, box.height / 2f)
+                            val o1 = if (s1 == 1f) Offset.Zero else clampOffset((center - tap) * (s1 - 1f), s1)
+                            animate(0f, 1f, animationSpec = tween(260)) { p, _ ->
+                                scale = s0 + (s1 - s0) * p
+                                offset = Offset(o0.x + (o1.x - o0.x) * p, o0.y + (o1.y - o0.y) * p)
+                            }
+                        }
+                    }
+                )
+            }
+            .pointerInput(item.id) {
+                detectTransformGestures { centroid, pan, zoom, _ ->
+                    val newScale = (scale * zoom).coerceIn(1f, 6f)
+                    val center = Offset(box.width / 2f, box.height / 2f)
+                    // Keep the point under the fingers fixed while scaling, then apply the pan.
+                    offset = clampOffset(offset + (centroid - center) * (scale - newScale) + pan, newScale)
+                    scale = newScale
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        AsyncImage(
+            // Decode up to 4096px so zooming in stays sharp without blowing up memory.
+            model = ImageRequest.Builder(context).data(item.uri).size(4096).build(),
+            contentDescription = item.name,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize().graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                translationX = offset.x
+                translationY = offset.y
+            }
+        )
     }
 }
 
@@ -585,6 +789,59 @@ private fun VideoPlayer(uri: Uri, modifier: Modifier = Modifier) {
         update = { it.player = player }
     )
 }
+
+// ---------- Lightroom ----------
+
+/**
+ * Sends a photo to Adobe Lightroom (Android "Open in Lr" is a share target).
+ * Falls back to ACTION_EDIT, then to the Play Store if Lightroom isn't installed.
+ */
+private fun openInLightroom(context: Context, uri: Uri) {
+    val installed = try {
+        context.packageManager.getPackageInfo(LIGHTROOM_PACKAGE, 0)
+        true
+    } catch (e: PackageManager.NameNotFoundException) {
+        false
+    }
+    if (!installed) {
+        Toast.makeText(context, "Lightroom isn't installed", Toast.LENGTH_SHORT).show()
+        val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$LIGHTROOM_PACKAGE"))
+        try {
+            context.startActivity(market)
+        } catch (e: ActivityNotFoundException) {
+            context.startActivity(Intent(Intent.ACTION_VIEW,
+                Uri.parse("https://play.google.com/store/apps/details?id=$LIGHTROOM_PACKAGE")))
+        }
+        return
+    }
+
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "image/*"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        clipData = ClipData.newRawUri("photo", uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        setPackage(LIGHTROOM_PACKAGE)
+    }
+    val edit = Intent(Intent.ACTION_EDIT).apply {
+        setDataAndType(uri, "image/*")
+        clipData = ClipData.newRawUri("photo", uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        setPackage(LIGHTROOM_PACKAGE)
+    }
+    for (intent in listOf(send, edit)) {
+        try {
+            context.startActivity(intent)
+            return
+        } catch (e: ActivityNotFoundException) {
+            // try the next way of opening it
+        } catch (e: SecurityException) {
+            // try the next way of opening it
+        }
+    }
+    Toast.makeText(context, "Lightroom couldn't open this photo", Toast.LENGTH_SHORT).show()
+}
+
+// ---------- Media loading ----------
 
 private fun hasMediaPermission(context: Context): Boolean {
     return if (Build.VERSION.SDK_INT >= 34) {
