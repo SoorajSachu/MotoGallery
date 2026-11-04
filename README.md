@@ -7,7 +7,9 @@ A local-first Android gallery for the Motorola Edge 70 Pro+ with a dark, translu
 - Album grouping
 - Search by filename and album
 - Persistent favourites
-- Full-screen media viewer and Android share sheet
+- Multi-select (long-press): share, favourite and delete (moves to bin) several items at once
+- Requests the display's highest refresh rate (120 Hz)
+- Full-screen media viewer with in-app video playback (Media3 ExoPlayer) and Android share sheet
 - Android 13+ media permissions, including Android 14 selected-photo access
 - No account, analytics, cloud upload, or network permission
 
@@ -28,6 +30,6 @@ Transfer `app-debug.apk` to your phone, open it, allow installation from that so
 
 ## Package details
 - Application ID: `com.sooraj.micagallery`
-- Minimum Android: 10 (API 29)
+- Minimum Android: 11 (API 30)
 - Target SDK: 35
 - Version: 1.0
